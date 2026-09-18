@@ -45,4 +45,40 @@ class AmountsTest {
     void ignoresAMessageWithNoAmountAtAll() {
         assertEquals(null, Amounts.first("Your Swiggy order is on the way!"));
     }
+
+    // --- INC-2026-09-11: tests for integer amounts (no decimals) ---
+
+    @Test
+    void readsIntegerAmountBeforeBalance() {
+        // The incident: Rs.5 was skipped, Available Balance Rs.92,213.10 was extracted
+        assertEquals(new BigDecimal("5.00"),
+                Amounts.first("Rs.5 debited from a/c **4821 on 04-07-26 at 07:19 "
+                        + "to UPI/WATER CAN. Avl Bal: Rs.92,213.10. Not you? Call 18002586161"));
+    }
+
+    @Test
+    void readsLargeIntegerAmountWithCommas() {
+        // INR 18,000 (no decimals) should not pick up Avl Bal
+        assertEquals(new BigDecimal("18000.00"),
+                Amounts.first("Dear Customer, Acct XX9075 is credited with INR 18,000 "
+                        + "on 01/07/2026 21:14. Info: NEFT INWARD SELF. Avl Bal Rs.49,882.25"));
+    }
+
+    @Test
+    void readsAmountWithOneDecimalPlace() {
+        assertEquals(new BigDecimal("5.50"),
+                Amounts.first("Rs.5.5 debited from a/c **4821"));
+    }
+
+    @Test
+    void readsRupeeSymbolAmount() {
+        assertEquals(new BigDecimal("500.00"),
+                Amounts.first("₹500 debited from your account"));
+    }
+
+    @Test
+    void balancePatternAlsoHandlesIntegerBalances() {
+        assertEquals(new BigDecimal("92213.00"),
+                Amounts.statedBalance("Avl Bal: Rs.92,213 as on 25-07-26"));
+    }
 }
