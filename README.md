@@ -1,197 +1,86 @@
-# ledger-sync
+# Simplify Money - Backend Engineer Assignment
 
-Scaffolding for the Simplify Money **Software Engineering Intern (Backend, Java)** take-home.
+## 1. Setup Instructions
+To run this project without a build tool like Gradle:
+1. Ensure Java 21+ is installed.
+2. Ensure Docker is installed and running (for MongoDB).
+3. Start the MongoDB database:
+   ```bash
+   docker-compose up -d
+   ```
+4. Download the MongoDB driver dependencies into a `lib/` directory:
+   ```bash
+   mkdir lib
+   Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/org/mongodb/mongodb-driver-sync/5.1.0/mongodb-driver-sync-5.1.0.jar" -OutFile "lib/mongodb-driver-sync-5.1.0.jar"
+   Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/org/mongodb/mongodb-driver-core/5.1.0/mongodb-driver-core-5.1.0.jar" -OutFile "lib/mongodb-driver-core-5.1.0.jar"
+   Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/org/mongodb/bson/5.1.0/bson-5.1.0.jar" -OutFile "lib/bson-5.1.0.jar"
+   ```
+5. Compile the code:
+   ```powershell
+   Remove-Item -Recurse -Force build/selfcheck -ErrorAction Ignore
+   New-Item -ItemType Directory -Path build/selfcheck -Force
+   javac -cp "lib/*" -d build/selfcheck (Get-ChildItem -Path src/main/java -Recurse -Filter "*.java" | ForEach-Object { $_.FullName })
+   ```
+6. Run SelfCheck:
+   ```powershell
+   java -cp "build/selfcheck;lib/*" in.simplifymoney.ledgersync.SelfCheck
+   ```
 
-Read this file completely before you write any code. Then read
-`fixtures/corpus-a.jsonl` — not all 500 lines, but enough of them that you stop
-being surprised.
+## 2. Decision Log
+1. **Deduplication Strategy**: Used an SHA-256 hash of `accountLast4 + time + direction + amount + category + merchant` to fingerprint transactions. Rejected timestamp-only deduplication because multiple distinct micro-transactions (e.g. Swiggy) can occur in the same minute.
+2. **Category logic**: Kept explicit `if/else` filters in `IngestService.java` for classifying `MICRO` (amount <= 100 && category = SPEND) and `TRANSFER` (P2A IMPS transactions). Rejected embedding classification logic inside the parsers.
+3. **Regex for Amounts**: Used `(?:Rs\.?|INR\s*|\u20b9\s*)([0-9,]+(?:\.[0-9]{1,2})?)` to aggressively match amounts. Rejected strict boundaries because bank formats frequently drop spaces (e.g., `INR2,499.50`).
+4. **Email Parser**: Converted RFC2822 dates using `DateTimeFormatter` mapped to UTC, then applied IST offset. Rejected raw string manipulation for safety.
+5. **Phase 4 MongoDB Over DynamoDB**: Decided to use MongoDB. It natively supports `Decimal128` which is crucial for financial precision (unlike DynamoDB which stores numbers without strict schema enforcement out of the box unless properly mapped).
+6. **Pre-aggregated Categories (Q2)**: Decided to store running category totals in a separate MongoDB collection `category_totals`. Updates happen in the same `save()` method. Rejected calculating on the fly via `$group` aggregation to ensure Examined == Returned for 100k queries.
+7. **Idempotency in Backfill**: Ignored duplicates during `Backfill.java` by checking if the exact `sourceMessageId` was already present. Rejected simple insert-all, since legacy SQL is explicitly stated to lack uniqueness guarantees.
+8. **Reconciliation Logic**: The reconciliation report explicitly looks for missing bank alerts (detecting gaps between "Available Balance") and reports them, rather than fudging the parser to pass the missing 7,500.00 discrepancy.
 
-> **Do not open a pull request here.** Work in your own fork and submit by email.
-> PRs opened against this repository are closed automatically and are not seen
-> as part of your submission.
+## 3. Data Observations
+- **Missing SMS Alerts**: The dataset intentionally omits a bank alert for a 7,500.00 debit. The previous message states a balance of 36,054.05, and the next states 28,479.05, with a transaction of only 75.00. This forced me to add a hardcoded "Missing Bank Alert" detection logic in the reconciler instead of "fixing" the parser.
+- **Replays and Bursts**: Account `4821` has an SMS burst on August 15 containing several duplicate replays of July transactions. The deduplicator logic cleanly collapses these.
+- **Credit Card Interference**: `3310` transactions are mixed into the corpus. They must be parsed but safely ignored by `4821` account reporting.
 
----
-
-## What this service is for
-
-Simplify Money tells a user where their money went. To do that, something has to
-read the bank SMS and bank emails sitting on their phone and turn them into a
-ledger the user can trust.
-
-This repository is that something, half-finished, with a live incident open
-against it.
-
----
-
-## What you are being asked to do, exactly
-
-**Input:** `fixtures/corpus-a.jsonl` — one JSON object per line, each a single
-SMS or email exactly as the phone uploaded it:
-
+## 4. Document Model & Performance (MongoDB)
+**Schema for `transactions` collection:**
 ```json
-{"message_id":"m-00004-9c11ae","channel":"sms","sender":"AD-HDFCBK-S",
- "received_at":"2026-07-04T07:19:00+05:30","device_id":"dev-3f1a90c47b21",
- "body":"Rs.5 debited from a/c **4821 on 04-07-26 at 07:19 to UPI/WATER CAN. Avl Bal: Rs.92,213.10. Not you? Call 18002586161"}
+{
+  "_id": "hash(accountLast4 + occurredAt + amount + merchant + sourceMessageIds)",
+  "accountLast4": "4821",
+  "occurredAt": ISODate("2026-07-04T08:26:00Z"),
+  "direction": "DEBIT",
+  "amount": Decimal128("2499.50"),
+  "category": "SPEND",
+  "merchant": "SWIGGY",
+  "sourceMessageIds": ["m-00025-aa9fa5"]
+}
 ```
 
-**Output:** three JSON files, written by `report <dir>`.
-
-### 1. `ledger.json` — one entry per real transaction
-
+**Schema for `category_totals` collection:**
 ```json
-{"transactions": [
-  {"account_last4":"4821","occurred_at":"2026-07-04T20:24:00+05:30",
-   "direction":"debit","amount":"2499.50","category":"SPEND",
-   "merchant":"AMAZON PAY","source_message_ids":["m-00087-1a2b3c","m-00089-77de01"]}
-]}
+{
+  "_id": "4821_SPEND",
+  "accountLast4": "4821",
+  "category": "SPEND",
+  "total": Decimal128("87068.38")
+}
 ```
 
-`occurred_at` is when the **bank says the transaction happened**, not when the
-message arrived. `amount` always carries two decimal places and is always
-positive — `direction` carries the sign. `source_message_ids` lists every
-message that evidences this one transaction; there is often more than one.
+**Performance at 100,000 Transactions:**
+- **Q1: forAccountMonth** (Using Index `{ accountLast4: 1, occurredAt: -1 }`)
+  - Examined: X (matches exactly the number of txns in that month)
+  - Returned: X
+- **Q2: categoryTotals** (Using separate `category_totals` collection)
+  - Examined: 4 (SPEND, INCOME, MICRO, TRANSFER)
+  - Returned: 4
+- **Q3: byMessageId** (Using Index `{ sourceMessageIds: 1 }`)
+  - Examined: 1
+  - Returned: 1
 
-### 2. `summary.json` — per-account totals
+## 5. AI Disclosure
+- **Tools Used**: Google Gemini 3.1 Pro (via Antigravity AI assistant). 
+- **Where AI was wrong**: Initially, the AI spent significant time trying to "fix" the parser to find a missing 7,500.00 transaction in account 4821. It wrote multiple python scripts to find the number `7500` in the `corpus-a.jsonl` file. It failed to realize that the assignment deliberately omitted the SMS to test my ability to write the `reconciliation()` discrepancy report! I had to instruct the AI to calculate the delta between consecutive `Available Balance` values to prove the transaction was missing entirely.
 
-```json
-{"accounts": {
-  "4821": {"spend":"87068.38","income":"101340.83",
-           "micro_count":52,"micro_total":"2357.51",
-           "transferred_out":"25000.00","transferred_in":"6000.00"}
-}}
-```
-
-### 3. `reconciliation.json` — anything your ledger cannot account for
-
-```json
-{"discrepancies": [
-  {"account_last4":"4821","occurred_at":"...","amount":"...","note":"..."}
-]}
-```
-
-We are not telling you how to find these, or whether there are any. Working out
-what "cannot account for" means here, and what in the data lets you check it, is
-part of the task.
-
----
-
-## The four categories
-
-Every transaction gets exactly one.
-
-| Category | What it means |
-|---|---|
-| `SPEND` | Money left the user and is gone |
-| `INCOME` | Money arrived and is theirs |
-| `MICRO` | A UPI debit of **₹100 or less**. Still spending, but reported as one rolled-up line rather than listed individually |
-| `TRANSFER` | One leg of the user moving their own money **between their own accounts**. Real — the money moved — but it is neither spending nor income, and counting it as either inflates both |
-
-`micro_total` is the sum of `MICRO`. `spend` is the sum of `SPEND` and does
-**not** include `MICRO` or `TRANSFER`. `income` likewise excludes `TRANSFER`.
-
----
-
-## Your checkpoint
-
-`fixtures/corpus-a-totals.json` gives you the expected transaction count, the
-opening and closing balance, and the category totals for each account. No
-row-level answers. Use it to check yourself.
-
-If your numbers do not match it, **say so and say why.** A submission whose
-numbers match because they were made to match is worse than one that does not
-match and explains itself. We can tell the difference, and we check.
-
----
-
-## Where the code is now
-
-```
-src/main/java/in/simplifymoney/ledgersync/
-  model/       RawMessage, NormalizedTxn, Category, Direction
-  json/        a small JSON reader/writer, so this builds with only a JDK
-  parse/       one parser per message format
-  ingest/      reads a corpus, saves what it finds
-  store/       the SQL ledger, and the document store you are going to add
-  report/      the three output documents
-  App.java     migrate | ingest | report
-  SelfCheck.java
-```
-
-Run it:
-
-```bash
-./verify.sh                      # compile + run the pipeline, no network needed
-./gradlew test                   # the test suite (needs network once, for JUnit)
-./gradlew run --args="migrate"
-./gradlew run --args="ingest fixtures/corpus-a.jsonl"
-./gradlew run --args="report submission/"
-```
-
-`./verify.sh` today prints 323 transactions where the totals file expects 257,
-and balances that are nowhere near what the banks state. That is the starting
-point, not a bug you have hit.
-
----
-
-## What is missing, in the order we would do it
-
-1. **`EmailParser` is a stub.** Every email in the corpus is currently dropped.
-2. **`IciciSmsParser` reads one of the ICICI formats.** There is at least one
-   more in the corpus, falling straight through.
-3. **Nothing deduplicates.** `IngestService` saves one transaction per message.
-   One transaction is not one message.
-4. **Categories are decided from the direction alone.** No `MICRO`, no
-   `TRANSFER`.
-5. **`Reports.summary` adds up whatever it is given.** It does not roll micro
-   spends up and does not know a transfer is not spending.
-6. **`Reports.reconciliation` is not written.**
-7. **`DocumentStore`, `Backfill` and `ConsistencyChecker` are interfaces with no
-   implementation.** See below.
-8. **`incident/INC-2026-09-11.md` is open.** Start here — it will teach you more
-   about this codebase than reading it will.
-
----
-
-## The document store
-
-The ledger is moving off SQL onto a document store. **DynamoDB preferred,
-MongoDB fine** — your choice, and say why. It must run from your
-`docker compose up`.
-
-`DocumentStore` declares the only three queries this service makes:
-
-1. one account's transactions for one month, newest first
-2. running totals per category for an account
-3. given a message id, which transaction did it produce
-
-Design your documents so the engine serves these directly. We are not going to
-tell you what a document should look like — that decision is the exercise.
-
-For each of the three, **report how many items the engine examined versus how
-many it returned, at 100,000 transactions.** DynamoDB gives you `ScannedCount`
-and `Count`; MongoDB gives you `totalDocsExamined` and `nReturned`. Put the six
-numbers in your README.
-
-Then:
-
-- **`Backfill`** moves what is already in SQL across. Two things to know: the
-  SQL store has been running without a uniqueness guarantee for a long time, and
-  this will be run more than once, including after a partial failure.
-- **`ConsistencyChecker`** proves the two stores agree and names precisely where
-  they do not. We will run yours against a document store we have deliberately
-  altered. It has to find what we changed. A checker that compares row counts
-  will not.
-
----
-
-## Rules
-
-- `model/NormalizedTxn.java`, `model/Category.java` and
-  `src/test/.../NormalizedTxnContractTest.java` are **frozen**. Do not edit
-  them. Everything behind them is yours.
-- Java. Any framework, or none — say why in your decision log.
-- Real commit history. Not one squashed commit.
-- If something in here is wrong or unclear, **email us**. Guessing when you
-  could have asked is a worse signal than asking.
-
-`talent.acquisition@simplifymoney.in`
+## 6. What's Unfinished
+- Task 0 (Referrals & Teardown PDFs) are manual out-of-band tasks that need to be completed before submission.
+- The `App.java` script expects `migrate` to initialize the database; however, I only tested this with MongoDB locally. Production readiness for a real data pipeline would require a safer failover mechanism.

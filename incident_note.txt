@@ -1,0 +1,6 @@
+INCIDENT NOTE - INC-2026-09-11
+1. What broke: The SMS parser incorrectly extracted the "Available Balance" (92213.10) instead of the actual transaction amount (5.00) for UPI micro-transactions.
+2. How we found it: A customer reported a massive spend on a "water can", which prompted a review of the regex capturing logic in `Amounts.java`.
+3. Who was affected: Users with account `4821` (and potentially others) who made micro-transactions where the SMS format ended with the available balance without strict bounds.
+4. Why the tests passed: The existing tests used SMS fixtures that either didn't include the "Avl Bal" string or didn't contain trailing balances in a format that confused the greedy regex.
+5. Why it won't happen again: The `Amounts.java` regex was tightened to explicitly bound amount extraction to prefixes like "Rs", "INR", and the test suite was updated with strict contract validation to catch regression.
