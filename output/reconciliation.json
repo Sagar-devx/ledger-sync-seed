@@ -1,0 +1,10 @@
+{
+  "discrepancies": [
+    {
+      "type": "MISSING_BANK_ALERT",
+      "accountLast4": "4821",
+      "description": "Bank alert missing for 7500.00 SPEND. Balance dropped by 7575.00 between consecutive messages on 29 Jul 2026, but the transaction alert was only for 75.00.",
+      "amount": "7500.00"
+    }
+  ]
+}
