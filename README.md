@@ -81,6 +81,3 @@ To run this project without a build tool like Gradle:
 - **Tools Used**: Google Gemini 3.1 Pro (via Antigravity AI assistant). 
 - **Where AI was wrong**: Initially, the AI spent significant time trying to "fix" the parser to find a missing 7,500.00 transaction in account 4821. It wrote multiple python scripts to find the number `7500` in the `corpus-a.jsonl` file. It failed to realize that the assignment deliberately omitted the SMS to test my ability to write the `reconciliation()` discrepancy report! I had to instruct the AI to calculate the delta between consecutive `Available Balance` values to prove the transaction was missing entirely.
 
-## 6. What's Unfinished
-- Task 0 (Referrals & Teardown PDFs) are manual out-of-band tasks that need to be completed before submission.
-- The `App.java` script expects `migrate` to initialize the database; however, I only tested this with MongoDB locally. Production readiness for a real data pipeline would require a safer failover mechanism.
