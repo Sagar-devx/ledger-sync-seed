@@ -46,6 +46,11 @@ public final class HdfcSmsParser implements MessageParser {
     public Optional<ParsedTxn> parse(RawMessage m) {
         String body = m.body();
 
+        // skip OTP messages
+        if (body.contains("is your OTP for txn")) return Optional.empty();
+        // skip balance-only alerts
+        if (body.contains("Avl Bal in a/c")) return Optional.empty();
+
         Matcher v1 = V1.matcher(body);
         if (v1.find()) {
             Direction d = v1.group("dir").startsWith("debited")
